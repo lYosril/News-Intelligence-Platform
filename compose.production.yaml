@@ -1,0 +1,187 @@
+# News Intelligence Platform - production-style stack
+#
+#   docker compose -f compose.production.yaml up --build -d
+#
+# Differences from compose.yaml:
+#   - Django runs with config.settings.production (required env validation),
+#     gunicorn instead of runserver, migrations + collectstatic on start.
+#   - PostgreSQL and Redis publish NO host ports; they live on an internal
+#     network reachable only by the backend/worker/beat.
+#   - nginx serves the built SPA and proxies /api/ and /static/ to the backend
+#     (same-origin for the browser - CORS is not involved).
+#   - restart: always on every service.
+#
+# Required variables (compose refuses to start without them - see .env.example):
+#   DJANGO_SECRET_KEY, DJANGO_ALLOWED_HOSTS, POSTGRES_PASSWORD
+# This is still a single-host dev-style deployment, not a hardened production
+# topology (TLS, replicas, backups are out of scope for milestone 1).
+name: news-intelligence-platform-production
+
+x-backend-env: &backend-env
+  DJANGO_SETTINGS_MODULE: config.settings.production
+  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required for production}
+  DJANGO_DEBUG: "false"
+  DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?DJANGO_ALLOWED_HOSTS is required for production}
+  DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-http://localhost:8080}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8080}
+  # Service-DNS URLs, built here on purpose: the DATABASE_URL / REDIS_URL in
+  # .env point at localhost and are only for running Django on the host.
+  DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required for production}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required for production}@db:5432/${POSTGRES_DB:-news_intelligence}
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/0
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required for production}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required for production}
+      POSTGRES_DB: ${POSTGRES_DB:-news_intelligence}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    expose:
+      - "5432" # reachable on the internal network only - no ports: mapping
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-news} -d $${POSTGRES_DB:-news_intelligence}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    networks:
+      - internal
+    restart: always
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    expose:
+      - "6379" # internal network only
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks:
+      - internal
+    restart: always
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    image: news-intelligence-backend:prod
+    command:
+      [
+        "gunicorn",
+        "config.wsgi:application",
+        "--bind",
+        "0.0.0.0:8000",
+        "--workers",
+        "${GUNICORN_WORKERS:-3}",
+        "--threads",
+        "2",
+        "--timeout",
+        "${GUNICORN_TIMEOUT:-60}",
+        "--access-logfile",
+        "-",
+        "--error-logfile",
+        "-",
+      ]
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "1"
+      RUN_COLLECTSTATIC: "1"
+    expose:
+      - "8000" # reachable by nginx on the edge network; no host port
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/', timeout=3).status == 200 else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - internal
+      - edge
+    restart: always
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    image: news-intelligence-backend:prod
+    command: ["celery", "-A", "config", "worker", "--loglevel=INFO"]
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "0"
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d celery@$${HOSTNAME} --timeout 10 | grep -q 'OK'"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 40s
+    networks:
+      - internal
+    restart: always
+
+  beat:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    image: news-intelligence-backend:prod
+    command: ["celery", "-A", "config", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "0"
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    networks:
+      - internal
+    restart: always
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.production.Dockerfile
+      args:
+        VITE_API_BASE_URL: ${PROD_VITE_API_BASE_URL:-}
+    image: news-intelligence-frontend:prod
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - edge
+    restart: always
+
+networks:
+  # db/redis are only attached here; nothing outside the app reaches them.
+  internal:
+    internal: true
+  # nginx <-> backend only.
+  edge:
+
+volumes:
+  postgres_data:
+  redis_data:

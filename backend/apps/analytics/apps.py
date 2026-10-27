@@ -1,0 +1,13 @@
+from django.apps import AppConfig
+
+
+class AnalyticsConfig(AppConfig):
+    """Analytics app: sentiment, topics, trends and forecasting.
+
+    Models and pipelines arrive in later milestones.
+    """
+
+    default_auto_field = "django.db.models.BigAutoField"
+    name = "apps.analytics"
+    label = "analytics"
+    verbose_name = "Analytics"

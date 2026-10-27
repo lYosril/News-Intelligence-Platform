@@ -1,0 +1,21 @@
+# Normalise line endings: LF in the repository for every text file.
+* text=auto
+
+# Shell scripts must stay LF or containers fail with "bad interpreter".
+*.sh text eol=lf
+Makefile text eol=lf
+
+# Keep explicit LF for source files as well (Windows checkouts).
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+
+# Windows-only files keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf

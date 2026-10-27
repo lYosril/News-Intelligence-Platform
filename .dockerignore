@@ -1,0 +1,26 @@
+# Build-context exclusions for all images (build context = repository root).
+.git
+.gitignore
+.gitattributes
+
+# Dependencies and build output
+**/node_modules
+frontend/dist
+**/__pycache__
+**/.venv
+venv
+
+# Local environment files (secrets must never enter an image)
+.env
+**/.env
+
+# Caches, logs and local databases
+**/.pytest_cache
+**/.ruff_cache
+*.log
+*.sqlite3
+backend/smoke.db
+backend/staticfiles
+
+# Not needed inside containers
+docs
